@@ -17,11 +17,15 @@
 #define debug(M...)
 #endif
 
-#define DIV_THRESHOLD 20
-#define DIFF_THRESHOLD 1000
 #define HASHSIZE 65536
 
 static char * ifname = "eth0";
+static int div_threshold = 20;
+static int diff_threshold = 1000;
+
+module_param(ifname, charp, 0);
+module_param(div_threshold, int, 0);
+module_param(diff_threshold, int, 0);
 
 typedef struct{
     int used;
@@ -149,7 +153,7 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
                     u32 diff = new_seq - conn->last_seq;
                     debug("divack: %u bytes since last ack\n", diff);
                     conn->last_seq = new_seq;
-                    if (diff > DIFF_THRESHOLD && conn->div_cnt < DIV_THRESHOLD) {
+                    if (diff > diff_threshold && conn->div_cnt < div_threshold) {
                         int div_size = diff / 3;
                         skb_new = skb_copy(skb, GFP_ATOMIC);
                         if (skb_new != NULL) {
@@ -165,7 +169,7 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
                             okfn(skb_new);
                         }
                         conn->div_cnt += 2;
-                        if (conn->div_cnt >= DIV_THRESHOLD) {
+                        if (conn->div_cnt >= div_threshold) {
                             conn->used = 0;
                             printk(KERN_INFO "divack: divack limit reached %s %u.%u.%u.%u %u %u\n",
                                     out->name,
@@ -207,7 +211,9 @@ int init_module(void)
         tracked[i].last_seq = 0;
     }
     nf_register_hook(&hook_ops);
-    printk(KERN_INFO "divack: init\n");
+    printk(KERN_INFO "divack: init for %s\n", ifname);
+    printk(KERN_INFO "divack: diff_threshold %d\n", diff_threshold);
+    printk(KERN_INFO "divack: div_threshold %d\n", div_threshold);
     return 0;
 }
 
