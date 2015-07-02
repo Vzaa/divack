@@ -13,16 +13,17 @@
 #include <linux/string.h>
 #include <linux/inet.h>
 
-#if 1
+#if 0
 #define debug(M...) printk(M)
 #else
 #define debug(M...)
 #endif
 
-#define DIV_THRRESHOLD 15
+#define DIV_THRESHOLD 20
 #define DIFF_THRESHOLD 1000
+#define HASHSIZE 65536
 
-static char * ifname = "eth2";
+static char * ifname = "eth0";
 
 typedef struct{
     int used;
@@ -35,18 +36,17 @@ typedef struct{
     spinlock_t lock;
 } tcp_conn_t;
 
-static tcp_conn_t tracked[256];
+static tcp_conn_t tracked[HASHSIZE];
 
-static unsigned char xor_hash(u32 daddr, u16 sport, u16 dport)
+static u16 xor_hash(u32 daddr, u16 sport, u16 dport)
 {
-    unsigned char hash = ((unsigned char*)&(daddr))[0] ^
-        ((unsigned char*)&(daddr))[1] ^
-        ((unsigned char*)&(daddr))[2] ^
-        ((unsigned char*)&(daddr))[3] ^
-        ((unsigned char*)&(sport))[0] ^
-        ((unsigned char*)&(sport))[1] ^
-        ((unsigned char*)&(dport))[0] ^
-        ((unsigned char*)&(dport))[1];
+    int i;
+    u16 hash = 0xdeadbeef;
+    for (i = 0; i < sizeof(daddr) / sizeof(hash); ++i) {
+        hash ^= ((u16*) (&daddr))[i];
+    }
+    hash ^= sport;
+    hash ^= dport;
     return hash;
 }
 
@@ -68,7 +68,7 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
     struct iphdr *iph = ip_hdr(skb);
     tcp_conn_t * conn = NULL;
     if (iph->protocol == 6 && !strcmp(out->name, ifname)) {
-        unsigned char hash;
+        u16 hash;
         struct tcphdr *tcph, _tcph;
         tcph = skb_header_pointer(skb, iph->ihl << 2, sizeof(_tcph), &_tcph);
 
@@ -77,13 +77,11 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
 
         if (tcph->syn) {
             spin_lock(&conn->lock);
-            if (conn->used == 0) {
-                debug(KERN_INFO "NEW %s %u.%u.%u.%u %u.%u.%u.%u %u %u\n",
-                        out->name,
-                        ((unsigned char*)&(iph->saddr))[0],
-                        ((unsigned char*)&(iph->saddr))[1],
-                        ((unsigned char*)&(iph->saddr))[2],
-                        ((unsigned char*)&(iph->saddr))[3],
+            if (conn->used == 0 ||
+                    (ntohl(iph->daddr) == conn->daddr &&
+                     ntohs(tcph->source) == conn->sport &&
+                     ntohs(tcph->dest) == conn->dport)) {
+                printk(KERN_INFO "Track %u.%u.%u.%u %u %u\n",
                         ((unsigned char*)&(iph->daddr))[0],
                         ((unsigned char*)&(iph->daddr))[1],
                         ((unsigned char*)&(iph->daddr))[2],
@@ -91,6 +89,7 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
                         ntohs(tcph->source),
                         ntohs(tcph->dest)
                      );
+                debug(KERN_INFO "hash: %u\n", hash);
                 conn->used = 1;
                 conn->first_ack = 0;
                 conn->div_cnt = 0;
@@ -99,10 +98,21 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
                 conn->dport = ntohs(tcph->dest);
             }
             else {
-                printk(KERN_INFO "hash overlap %u %u %u\n",
-                        ntohs(tcph->dest),
+                printk(KERN_INFO "HASH OVERLAP!!! %s %u.%u.%u.%u %u %u overlap with existing %u.%u.%u.%u %u %u\n",
+                        out->name,
+                        ((unsigned char*)&(iph->daddr))[0],
+                        ((unsigned char*)&(iph->daddr))[1],
+                        ((unsigned char*)&(iph->daddr))[2],
+                        ((unsigned char*)&(iph->daddr))[3],
                         ntohs(tcph->source),
-                        ntohl(iph->daddr));
+                        ntohs(tcph->dest),
+                        ((unsigned char*)&(conn->daddr))[0],
+                        ((unsigned char*)&(conn->daddr))[1],
+                        ((unsigned char*)&(conn->daddr))[2],
+                        ((unsigned char*)&(conn->daddr))[3],
+                        conn->sport,
+                        conn->dport
+                      );
             }
             spin_unlock(&conn->lock);
         }
@@ -113,12 +123,8 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
                     ntohs(tcph->source) == conn->sport &&
                     ntohs(tcph->dest) == conn->dport) {
                 conn->used = 0;
-                debug(KERN_INFO "CLOSE %s %u.%u.%u.%u %u.%u.%u.%u %u %u\n",
+                printk(KERN_INFO "CLOSE %s %u.%u.%u.%u %u %u\n",
                         out->name,
-                        ((unsigned char*)&(iph->saddr))[0],
-                        ((unsigned char*)&(iph->saddr))[1],
-                        ((unsigned char*)&(iph->saddr))[2],
-                        ((unsigned char*)&(iph->saddr))[3],
                         ((unsigned char*)&(iph->daddr))[0],
                         ((unsigned char*)&(iph->daddr))[1],
                         ((unsigned char*)&(iph->daddr))[2],
@@ -145,7 +151,7 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
                     u32 diff = new_seq - conn->last_seq;
                     debug("%u bytes since last ack\n", diff);
                     conn->last_seq = new_seq;
-                    if (diff > DIFF_THRESHOLD && conn->div_cnt < DIV_THRRESHOLD) {
+                    if (diff > DIFF_THRESHOLD && conn->div_cnt < DIV_THRESHOLD) {
                         int div_size = diff / 3;
                         skb_new = skb_copy(skb, GFP_ATOMIC);
                         if (skb_new != NULL) {
@@ -161,14 +167,10 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
                             okfn(skb_new);
                         }
                         conn->div_cnt += 2;
-                        if (conn->div_cnt > DIV_THRRESHOLD) {
+                        if (conn->div_cnt >= DIV_THRESHOLD) {
                             conn->used = 0;
-                            debug(KERN_INFO "Stop tracking %s %u.%u.%u.%u %u.%u.%u.%u %u %u\n",
+                            printk(KERN_INFO "divack limit reached %s %u.%u.%u.%u %u %u\n",
                                     out->name,
-                                    ((unsigned char*)&(iph->saddr))[0],
-                                    ((unsigned char*)&(iph->saddr))[1],
-                                    ((unsigned char*)&(iph->saddr))[2],
-                                    ((unsigned char*)&(iph->saddr))[3],
                                     ((unsigned char*)&(iph->daddr))[0],
                                     ((unsigned char*)&(iph->daddr))[1],
                                     ((unsigned char*)&(iph->daddr))[2],
@@ -198,7 +200,7 @@ static struct nf_hook_ops hook_ops = {
 int init_module(void)
 {
     int i;
-    for (i = 0; i < 256; ++i) {
+    for (i = 0; i < HASHSIZE; ++i) {
         spin_lock_init(&tracked[i].lock);
         tracked[i].used = 0;
         tracked[i].daddr = 0;
