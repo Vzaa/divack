@@ -1,4 +1,4 @@
-obj-m += nf.o
+obj-m += divack.o
 
 all:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
