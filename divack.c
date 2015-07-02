@@ -1,11 +1,9 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
-#include <linux/list.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
-#include <linux/icmp.h>
 #include <linux/netdevice.h>
 #include <linux/netfilter.h>
 
@@ -81,7 +79,7 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
                     (ntohl(iph->daddr) == conn->daddr &&
                      ntohs(tcph->source) == conn->sport &&
                      ntohs(tcph->dest) == conn->dport)) {
-                printk(KERN_INFO "Track %u.%u.%u.%u %u %u\n",
+                printk(KERN_INFO "divack: Track %u.%u.%u.%u %u %u\n",
                         ((unsigned char*)&(iph->daddr))[0],
                         ((unsigned char*)&(iph->daddr))[1],
                         ((unsigned char*)&(iph->daddr))[2],
@@ -89,7 +87,7 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
                         ntohs(tcph->source),
                         ntohs(tcph->dest)
                      );
-                debug(KERN_INFO "hash: %u\n", hash);
+                debug(KERN_INFO "divack: hash: %u\n", hash);
                 conn->used = 1;
                 conn->first_ack = 0;
                 conn->div_cnt = 0;
@@ -98,7 +96,7 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
                 conn->dport = ntohs(tcph->dest);
             }
             else {
-                printk(KERN_INFO "HASH OVERLAP!!! %s %u.%u.%u.%u %u %u overlap with existing %u.%u.%u.%u %u %u\n",
+                printk(KERN_INFO "divack: HASH OVERLAP!!! %s %u.%u.%u.%u %u %u overlap with existing %u.%u.%u.%u %u %u\n",
                         out->name,
                         ((unsigned char*)&(iph->daddr))[0],
                         ((unsigned char*)&(iph->daddr))[1],
@@ -123,7 +121,7 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
                     ntohs(tcph->source) == conn->sport &&
                     ntohs(tcph->dest) == conn->dport) {
                 conn->used = 0;
-                printk(KERN_INFO "CLOSE %s %u.%u.%u.%u %u %u\n",
+                printk(KERN_INFO "divack: Conn. close %s %u.%u.%u.%u %u %u\n",
                         out->name,
                         ((unsigned char*)&(iph->daddr))[0],
                         ((unsigned char*)&(iph->daddr))[1],
@@ -149,27 +147,27 @@ unsigned int my_hook(const struct nf_hook_ops *ops,
                 else {
                     struct sk_buff * skb_new;
                     u32 diff = new_seq - conn->last_seq;
-                    debug("%u bytes since last ack\n", diff);
+                    debug("divack: %u bytes since last ack\n", diff);
                     conn->last_seq = new_seq;
                     if (diff > DIFF_THRESHOLD && conn->div_cnt < DIV_THRESHOLD) {
                         int div_size = diff / 3;
                         skb_new = skb_copy(skb, GFP_ATOMIC);
                         if (skb_new != NULL) {
-                            debug("div w seq no %u\n", conn->last_seq - (2 * div_size));
+                            debug("divack: insert div w seq no %u\n", conn->last_seq - (2 * div_size));
                             update_ack_seq(skb_new, conn->last_seq - (2 * div_size));
                             okfn(skb_new);
                         }
 
                         skb_new = skb_copy(skb, GFP_ATOMIC);
                         if (skb_new != NULL) {
-                            debug("div w seq no %u\n", conn->last_seq - div_size);
+                            debug("divack: insert div w seq no %u\n", conn->last_seq - div_size);
                             update_ack_seq(skb_new, conn->last_seq - div_size);
                             okfn(skb_new);
                         }
                         conn->div_cnt += 2;
                         if (conn->div_cnt >= DIV_THRESHOLD) {
                             conn->used = 0;
-                            printk(KERN_INFO "divack limit reached %s %u.%u.%u.%u %u %u\n",
+                            printk(KERN_INFO "divack: divack limit reached %s %u.%u.%u.%u %u %u\n",
                                     out->name,
                                     ((unsigned char*)&(iph->daddr))[0],
                                     ((unsigned char*)&(iph->daddr))[1],
